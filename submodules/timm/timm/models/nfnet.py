@@ -24,6 +24,8 @@ from typing import Callable, Tuple, Optional
 import torch
 import torch.nn as nn
 
+from shared.modules.factories import get_noise_factory
+
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import ClassifierHead, DropPath, AvgPool2dSame, ScaledStdConv2d, ScaledStdConv2dSame, \
     get_act_layer, get_act_fn, get_attn, make_divisible
@@ -58,6 +60,7 @@ class NfCfg:
     skipinit: bool = False  # disabled by default, non-trivial performance impact
     zero_init_fc: bool = False
     act_layer: str = 'silu'
+    disable_first_stride: bool = False  # Forces the stride of the first stage to be zero
 
 
 class GammaAct(nn.Module):
@@ -211,7 +214,7 @@ def create_stem(
     stem_stride = 2
     stem_feature = dict(num_chs=out_chs, reduction=2, module='stem.conv')
     stem = OrderedDict()
-    assert stem_type in ('', 'deep', 'deep_tiered', 'deep_quad', '3x3', '7x7', 'deep_pool', '3x3_pool', '7x7_pool')
+    assert stem_type in ('', 'deep', 'deep_tiered', 'deep_quad', '3x3', '7x7', 'deep_pool', '3x3_pool', '7x7_pool', '3x3_plain')
     if 'deep' in stem_type:
         if 'quad' in stem_type:
             # 4 deep conv stack as in NFNet-F models
@@ -233,6 +236,10 @@ def create_stem(
             if i != last_idx:
                 stem[f'act{i + 2}'] = act_layer(inplace=True)
             in_chs = c
+    elif stem_type == '3x3_plain':
+        stem['conv'] = conv_layer(in_chs, out_chs, kernel_size=3, stride=1)
+        stem_stride = 1
+        stem_feature = dict(num_chs=out_chs, reduction=1, module='stem.conv')
     elif '3x3' in stem_type:
         # 3x3 stem conv as in RegNet
         stem['conv'] = conv_layer(in_chs, out_chs, kernel_size=3, stride=2)
@@ -298,6 +305,7 @@ class NormFreeNet(nn.Module):
             output_stride: int = 32,
             drop_rate: float = 0.,
             drop_path_rate: float = 0.,
+            noise_cfg=None,
             **kwargs,
     ):
         """
@@ -327,6 +335,14 @@ class NormFreeNet(nn.Module):
             conv_layer = partial(conv_layer, gamma=_nonlin_gamma[cfg.act_layer], eps=cfg.std_conv_eps)
         attn_layer = partial(get_attn(cfg.attn_layer), **cfg.attn_kwargs) if cfg.attn_layer else None
 
+        if noise_cfg is not None:
+            noise_factory = get_noise_factory(noise_cfg)
+            original_act_layer = act_layer
+            act_layer = lambda *args, **kwargs: torch.nn.Sequential(
+                noise_factory(),
+                original_act_layer(*args, **kwargs)
+            )
+
         stem_chs = make_divisible((cfg.stem_chs or cfg.channels[0]) * cfg.width_factor, cfg.ch_div)
         self.stem, stem_stride, stem_feat = create_stem(
             in_chans,
@@ -344,7 +360,7 @@ class NormFreeNet(nn.Module):
         expected_var = 1.0
         stages = []
         for stage_idx, stage_depth in enumerate(cfg.depths):
-            stride = 1 if stage_idx == 0 and stem_stride > 2 else 2
+            stride = 1 if stage_idx == 0 and (stem_stride > 2 or cfg.disable_first_stride) else 2
             if net_stride >= output_stride and stride > 1:
                 dilation *= stride
                 stride = 1
@@ -1028,3 +1044,31 @@ def nf_ecaresnet101(pretrained=False, **kwargs):
     """ Normalization-Free ECA-ResNet101
     """
     return _create_normfreenet('nf_ecaresnet101', pretrained=pretrained, **kwargs)
+
+
+
+#####################
+
+@register_model
+def cifar_nf_resnet26(**kwargs):
+    """ Normalization-Free ResNet-26
+    `Characterizing signal propagation to close the performance gap in unnormalized ResNets`
+        - https://arxiv.org/abs/2101.08692
+    """
+    kwargs.pop('pretrained', None)
+    kwargs.pop('pretrained_cfg', None)
+    kwargs.pop('pretrained_cfg_overlay', None)
+
+    return NormFreeNet(
+        cfg=NfCfg(
+            depths=(2,2,2,2),
+            channels=(256, 512, 1024, 2048),
+            act_layer='relu',
+            alpha=0.2, # Based on original paper
+            stem_type="3x3_plain",
+            disable_first_stride=True,
+            stem_chs=64,
+            bottle_ratio=0.25,
+        ),
+        **kwargs,
+    )

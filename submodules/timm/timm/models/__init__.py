@@ -3,6 +3,7 @@ from .byoanet import *
 from .byobnet import *
 from .cait import *
 from .cifar_resnet import *
+from .cifar_simple_vit import *
 from .coat import *
 from .convit import *
 from .convmixer import *

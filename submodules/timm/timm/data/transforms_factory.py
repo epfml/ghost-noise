@@ -8,6 +8,7 @@ import math
 import torch
 from torchvision import transforms
 
+import timm.data
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, DEFAULT_CROP_PCT
 from timm.data.auto_augment import rand_augment_transform, augment_and_mix_transform, auto_augment_transform
 from timm.data.transforms import str_to_interp_mode, str_to_pil_interp, RandomResizedCropAndInterpolation,\
@@ -288,8 +289,19 @@ def create_transform_from_dict(transform_dict):
     # Could be extended to also include the custom timm ones
     transform_list = []
     for name, arguments in transform_dict.items():
+        if '.' in name:
+            library_name, transform_name = name.split('.', 1)
+        else:
+            library_name = 'torchvision'
+            transform_name = name
+
+        if library_name == 'torchvision':
+            library = transforms
+        elif library_name == 'timm':
+            library = timm.data.transforms
+
         if isinstance(arguments, (tuple, list)):
-            transform_list.append(getattr(transforms, name)(*arguments))
+            transform_list.append(getattr(library, transform_name)(*arguments))
         elif isinstance(arguments, dict):
-            transform_list.append(getattr(transforms, name)(**arguments))
+            transform_list.append(getattr(library, transform_name)(**arguments))
     return transforms.Compose(transform_list)
